@@ -1,0 +1,101 @@
+---
+title: "Arkansas Field Data 2016"
+output: html_notebook
+---
+
+## Load in Data
+Here we will import all of the necessary files. I will first import the counts table. This table was converted from the original biom file to a tab separated file. Next is the mapping file, which is the metadata. After that is the taxonomy file, which contains all of the taxonomies for the OTUs in the count table. The last file contains all of the OTUs that have been assigned as either plastid or mitochondria. 
+```{r}
+library(lubridate)
+library(tidyverse)
+setwd("~/Google Drive/RMB/Analyses/ArkansasField/ARK16/FULLData/Data/")
+counts <- read.table(gzfile("ark16_otutable.txt.gz"), header = T, row.names = 1, sep = "\t")
+map <- read.table("ark16.map", header = T, sep = "\t") %>% mutate(Date = mdy(Date)) %>% mutate(Days = as.numeric(Date - min(Date)))
+tax <- readRDS("gg_otus_tax.rds")
+organelle_otus <- readRDS("organelle.rds")
+```
+
+## Remove organellar reads from the data
+Mitochondria and plastids have 16S rRNA that gets sequenced along with the all of the other bacteria. These need to be removed, as they are not part of the microbiome.
+```{r}
+countsNoOrg <- counts[!row.names(counts)%in%org,]
+```
+
+## Make sure the mapping file is in the same order as the counts
+I will also add on sampling depth as a column in the map. If a sample has 200 reads or so, I usually throw it away. But the minumum here is a little bit less than 4000, so I think it's okay.
+```{r}
+map <- map[match(colnames(countsNoOrg), map$SampleID),]
+map$Depth <- colSums(countsNoOrg)
+map %>% 
+  ggplot(., aes(Depth, fill = Compartment)) +
+  geom_histogram() +
+  facet_grid(.~Compartment)
+```
+
+## Normalize the counts table
+There are a few ways of normalizing counts. I will employ using relative abundance here. It's pretty much just the looking at the percent of each microbe in each sample
+```{r}
+RA <- t(t(countsNoOrg) / colSums(countsNoOrg)) * 1000
+```
+
+## Remove OTUs that do not show up in 5% of the samples
+I will remove microbes that do not show up regularly. These are noisy OTUs, and while they may be real, they most likely popped up through contamination, sequencing and PCR error. They make the downstream stats noisy, and so I will remove them.
+```{r}
+occurence <- function(x){
+  return(length(x[x > 0]))
+}
+RA_clean <- RA[apply(RA, 1, occurence) >= ncol(RA) * 0.05,]
+cat(nrow(RA), "OTUs in original table.\n")
+cat(nrow(RA_clean), "OTUs in cleaned table.\n")
+```
+
+## Make a tidy version of the data
+```{r}
+library(reshape2)
+ark.data <- melt(cbind(map, t(RA_clean)), id.vars = names(map)) %>% 
+  inner_join(tax, by = "variable")
+```
+
+
+# Statistics
+## Permanova
+Permanova will tell you if an experimental factor is important for describing differences between your samples of multivariate data.
+```{r}
+library(vegan)
+adonis(t(log2(RA + 1)) ~ Compartment * Days * Cultivar, data = map)
+```
+This is telling us that Compartment, Days, and Cultivar are all significant factors explaining differences between the microbiomes of our samples. There is also a significant interaction of Compartment with Days suggesting that the differences between the compartments is dependent on the age of the plant. The relative effect size is given by the 'R2' value.
+
+So now that we know that some of these factors are important, let's go ahead and visualize the clustering patterns with PCoA.
+```{r}
+ark.pc <- capscale(t(log2(RA + 1)) ~ 1)
+ark.pc_axes <- cbind(map, scores(ark.pc, choices = c(1:3))$sites)
+ark.pc_axes %>% 
+  ggplot(., aes(MDS1, MDS2, color = factor(Date), shape = Compartment)) +
+  geom_point() +
+  theme_minimal()
+```
+
+## Distribution of Phyla 
+You can play around with the different levels that you would like to look like. This code is finding the top 10 most abundant phyla (Proteobacteria is broken down to it's various classes because it's a super phylum) and plotting them out.
+```{r}
+ark.data %>% 
+  group_by(Phylum2) %>% 
+  summarise(total = sum(value)) %>% 
+  arrange(-total) %>% 
+  head(10) %>% 
+  inner_join(ark.data, by = "Phylum2") %>% 
+  group_by(SampleID, Compartment, Cultivar, Plot, Phylum2, Date, Rep) %>% 
+  summarise(total = sum(value)) %>% 
+  ggplot(., aes(x = paste(Plot, Rep), y = total, fill = Phylum2))+
+  geom_bar(stat = "identity") +
+  facet_grid(Compartment ~ Date, scales = "free") +
+  scale_fill_brewer(palette = "Spectral")
+```
+
+
+
+
+
+
+
