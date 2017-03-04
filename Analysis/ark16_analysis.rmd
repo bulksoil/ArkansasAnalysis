@@ -62,7 +62,7 @@ ark.data <- melt(cbind(map, t(RA_clean)), id.vars = names(map)) %>%
 Permanova will tell you if an experimental factor is important for describing differences between your samples of multivariate data.
 ```{r}
 library(vegan)
-adonis(t(log2(RA + 1)) ~ Compartment * Days * Cultivar, data = map)
+adonis(t(log2(RA + 1)) ~ Compartment * Days * Cultivar, strata = map$Plot, data = map)
 ```
 This is telling us that Compartment, Days, and Cultivar are all significant factors explaining differences between the microbiomes of our samples. There is also a significant interaction of Compartment with Days suggesting that the differences between the compartments is dependent on the age of the plant. The relative effect size is given by the 'R2' value.
 
@@ -93,7 +93,64 @@ ark.data %>%
   scale_fill_brewer(palette = "Spectral")
 ```
 
+## Model Methangens and Methanotrophs
+### Methanogens
+The strategy is to grep out methanogens and then run a basic linear model on each OTU looking for differences in abundance between compartments as a interaction with the plant age. I included sequencing depth as a covariate. This would probably work best in a mixed model, but I am using this method for the time being due to its simplicity. The data is log transformed to hopefully bring the error distribution somewhere to normal. Later, I would like to employ a different normalization strategy called rarefaction and then run a negative binomial glm.
+```{r}
+methanogen.lm <- ark.data %>% 
+  filter(grepl("Methano", Order)) %>% 
+  group_by(variable) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
+  unnest(map(models, tidy)) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH"))
+methanogen.lm %>% 
+  filter(p.adj <= 0.05)
+```
+There are 5 OTUs that come back as having a significant interaction over time in the rhizosphere (being significantly different than bulk soil). Let's see if any of these have a significant cultivar interactin with time
 
+```{r}
+methanogen.lm %>% 
+  filter(p.adj <= 0.05 & term == "CompartmentRhizosphere:Days") %>% 
+  dplyr::select(variable) %>% 
+  inner_join(ark.data, by = "variable") %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  group_by(variable, Compartment) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~lm(log2(value + 1) ~ Cultivar * Days + Depth, .))) %>% 
+  unnest(map(models, tidy)) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
+  filter(p.adj <= 0.05)
+```
+
+Two methanogens came back as being higher in Sabine than CLXL745 over time. 533 is Methanocella and 626383 is Methanobacterium
+
+### Methanotrophs
+```{r}
+methanotroph.lm <- ark.data %>% 
+  filter(Family == "Methylocystaceae" | Family == "Methylococcaceae") %>% 
+  filter(Genus != "Pleomorphomonas") %>% 
+  group_by(variable) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
+  unnest(map(models, tidy)) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH"))
+methanotroph.lm %>% 
+  filter(p.adj <= 0.05)
+```
+```{r}
+methanotroph.lm %>% 
+  filter(p.adj <= 0.05 & term == "CompartmentEndosphere:Days") %>% 
+  dplyr::select(variable) %>% 
+  inner_join(ark.data, by = "variable") %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  group_by(variable, Compartment) %>% 
+  nest() %>% 
+  mutate(models = map(data, ~lm(log2(value + 1) ~ Cultivar * Days + Depth, .))) %>% 
+  unnest(map(models, tidy)) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
+  filter(p.adj <= 0.05)
+```
 
 
 
