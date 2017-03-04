@@ -97,6 +97,7 @@ ark.data %>%
 ### Methanogens
 The strategy is to grep out methanogens and then run a basic linear model on each OTU looking for differences in abundance between compartments as a interaction with the plant age. I included sequencing depth as a covariate. This would probably work best in a mixed model, but I am using this method for the time being due to its simplicity. The data is log transformed to hopefully bring the error distribution somewhere to normal. Later, I would like to employ a different normalization strategy called rarefaction and then run a negative binomial glm.
 ```{r}
+library(knitr)
 methanogen.lm <- ark.data %>% 
   filter(grepl("Methano", Order)) %>% 
   group_by(variable) %>% 
@@ -104,13 +105,16 @@ methanogen.lm <- ark.data %>%
   mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
   unnest(map(models, tidy)) %>% 
   mutate(p.adj = p.adjust(p.value, "BH"))
-methanogen.lm %>% 
-  filter(p.adj <= 0.05)
+
+methanogen.lm_results <- methanogen.lm %>% 
+  filter(p.adj <= 0.05) 
+
+kable(methanogen.lm_results)
 ```
 There are 5 OTUs that come back as having a significant interaction over time in the rhizosphere (being significantly different than bulk soil). Let's see if any of these have a significant cultivar interactin with time
 
 ```{r}
-methanogen.lm %>% 
+cultivar_mathanogens <- methanogen.lm %>% 
   filter(p.adj <= 0.05 & term == "CompartmentRhizosphere:Days") %>% 
   dplyr::select(variable) %>% 
   inner_join(ark.data, by = "variable") %>% 
@@ -121,6 +125,8 @@ methanogen.lm %>%
   unnest(map(models, tidy)) %>% 
   mutate(p.adj = p.adjust(p.value, "BH")) %>% 
   filter(p.adj <= 0.05)
+
+kable(cultivar_mathanogens)
 ```
 
 Two methanogens came back as being higher in Sabine than CLXL745 over time. 533 is Methanocella and 626383 is Methanobacterium
@@ -135,11 +141,14 @@ methanotroph.lm <- ark.data %>%
   mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
   unnest(map(models, tidy)) %>% 
   mutate(p.adj = p.adjust(p.value, "BH"))
-methanotroph.lm %>% 
+
+methanotroph.lm_results <- methanotroph.lm %>% 
   filter(p.adj <= 0.05)
+
+kable(methanotroph.lm_results)
 ```
 ```{r}
-methanotroph.lm %>% 
+cultivar_methanotrophs <- methanotroph.lm %>% 
   filter(p.adj <= 0.05 & term == "CompartmentEndosphere:Days") %>% 
   dplyr::select(variable) %>% 
   inner_join(ark.data, by = "variable") %>% 
@@ -150,6 +159,8 @@ methanotroph.lm %>%
   unnest(map(models, tidy)) %>% 
   mutate(p.adj = p.adjust(p.value, "BH")) %>% 
   filter(p.adj <= 0.05)
+
+kable(cultivar_methanotrophs)
 ```
 
 
