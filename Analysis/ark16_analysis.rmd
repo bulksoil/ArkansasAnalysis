@@ -72,8 +72,9 @@ ark.pc <- capscale(t(log2(RA + 1)) ~ 1)
 ark.pc_axes <- cbind(map, scores(ark.pc, choices = c(1:3))$sites)
 ark.pc_axes %>% 
   ggplot(., aes(MDS1, MDS2, color = factor(Date), shape = Compartment)) +
-  geom_point() +
-  theme_minimal()
+  geom_point(size = 2) +
+  theme_minimal() +
+  labs(color = "Date")
 ```
 
 ## Distribution of Phyla 
@@ -89,8 +90,11 @@ ark.data %>%
   summarise(total = sum(value)) %>% 
   ggplot(., aes(x = paste(Plot, Rep), y = total, fill = Phylum2))+
   geom_bar(stat = "identity") +
+  labs(x = "Individual Samples", y = "Relative Abundance") +
   facet_grid(Compartment ~ Date, scales = "free") +
-  scale_fill_brewer(palette = "Spectral")
+  scale_fill_brewer(palette = "Spectral") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "bottom")
 ```
 
 ## Model Methangens and Methanotrophs
@@ -129,9 +133,25 @@ cultivar_mathanogens <- methanogen.lm %>%
 kable(cultivar_mathanogens)
 ```
 
-Two methanogens came back as being higher in Sabine than CLXL745 over time. 533 is Methanocella and 626383 is Methanobacterium
+Two methanogens came back as being higher in Sabine than CLXL745 over time. 533 is Methanocella and 626383 is Methanobacterium.
+```{r}
+ark.data %>% 
+  filter(variable == "626383" | variable == "533") %>% 
+  mutate(Compartment = factor(Compartment, levels = c("Bulk Soil", "Rhizosphere", "Endosphere"))) %>% 
+  ggplot(., aes(Date, value, color = Cultivar)) +
+  geom_point() +
+  geom_smooth(se = F) +
+  facet_grid(.~variable+Compartment) +
+  scale_color_brewer(palette = "Accent") +
+  theme_minimal() +
+  labs(x = "", y = "Relative Abundance (per Mille)") +
+  theme(text = element_text(size = 10), axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+I think the association would be stronger if not for that one CLXL745 sample in September.
 
 ### Methanotrophs
+Methanotrophic eubacteria could be on the other side of this methane story. There are two families with methanotrophic capabilities, Methylocystaceae and Methylococcaceae. There's an outlier genus in Methylocystaceae that cannot perform methanotrophy, Pleomorphomonas. 
 ```{r}
 methanotroph.lm <- ark.data %>% 
   filter(Family == "Methylocystaceae" | Family == "Methylococcaceae") %>% 
@@ -147,6 +167,7 @@ methanotroph.lm_results <- methanotroph.lm %>%
 
 kable(methanotroph.lm_results)
 ```
+There are a few methanotrophs that seems to become enriched in the endopshere over time (but not in the rhizosphere). This pattern makes sense as the endosphere should have the highest levels of oxygen, a conditions that a methanotrophic lifestyle requires. Let's see if any of the OTUs have an interaction with time to become differentially abundant between the cultivars.
 ```{r}
 cultivar_methanotrophs <- methanotroph.lm %>% 
   filter(p.adj <= 0.05 & term == "CompartmentEndosphere:Days") %>% 
@@ -162,7 +183,7 @@ cultivar_methanotrophs <- methanotroph.lm %>%
 
 kable(cultivar_methanotrophs)
 ```
-
+It looks like two of the methanotrophs change their abundance patterns over the season, but there is not significant differences between the cultivars.
 
 
 
