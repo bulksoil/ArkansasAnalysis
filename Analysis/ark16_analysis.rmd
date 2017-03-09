@@ -10,7 +10,7 @@ library(lubridate)
 library(tidyverse)
 setwd("~/Google Drive/RMB/Analyses/ArkansasField/ARK16/FULLData/Data/")
 counts <- read.table(gzfile("ark16_otutable.txt.gz"), header = T, row.names = 1, sep = "\t")
-map <- read.table("ark16.map", header = T, sep = "\t") %>% mutate(Date = mdy(Date)) %>% mutate(Days = as.numeric(Date - min(Date)))
+map <- read.table("../Data/ark16.map", header = T, sep = "\t") %>% mutate(Date = mdy(Date)) %>% mutate(Days = as.numeric(Date - min(Date)))
 tax <- readRDS("gg_otus_tax.rds")
 organelle_otus <- readRDS("organelle.rds")
 ```
@@ -18,7 +18,7 @@ organelle_otus <- readRDS("organelle.rds")
 ## Remove organellar reads from the data
 Mitochondria and plastids have 16S rRNA that gets sequenced along with the all of the other bacteria. These need to be removed, as they are not part of the microbiome.
 ```{r}
-countsNoOrg <- counts[!row.names(counts)%in%org,]
+countsNoOrg <- counts[!row.names(counts)%in%organelle_otus,]
 ```
 
 ## Make sure the mapping file is in the same order as the counts
@@ -62,13 +62,13 @@ ark.data <- melt(cbind(map, t(RA_clean)), id.vars = names(map)) %>%
 Permanova will tell you if an experimental factor is important for describing differences between your samples of multivariate data.
 ```{r}
 library(vegan)
-adonis(t(log2(RA + 1)) ~ Compartment * Days * Cultivar, strata = map$Plot, data = map)
+adonis(t(log2(RA_clean + 1)) ~ Compartment + Days * Cultivar, strata = factor(map$Lane), data = map)
 ```
-This is telling us that Compartment, Days, and Cultivar are all significant factors explaining differences between the microbiomes of our samples. There is also a significant interaction of Compartment with Days suggesting that the differences between the compartments is dependent on the age of the plant. The relative effect size is given by the 'R2' value.
+This is telling us that Compartment, Days, and Cultivar are all significant factors explaining differences between the microbiomes of our samples. There is also a significant interaction of Cultivar with Days suggesting that the differences between the compartments is dependent on the age of the plant. The relative effect size is given by the 'R2' value.
 
 So now that we know that some of these factors are important, let's go ahead and visualize the clustering patterns with PCoA.
 ```{r}
-ark.pc <- capscale(t(log2(RA + 1)) ~ 1)
+ark.pc <- capscale(t(log2(RA_clean + 1)) ~ 1)
 ark.pc_axes <- cbind(map, scores(ark.pc, choices = c(1:3))$sites)
 ark.pc_axes %>% 
   ggplot(., aes(MDS1, MDS2, color = factor(Date), shape = Compartment)) +
@@ -97,94 +97,237 @@ ark.data %>%
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "bottom")
 ```
 
-## Model Methangens and Methanotrophs
-### Methanogens
-The strategy is to grep out methanogens and then run a basic linear model on each OTU looking for differences in abundance between compartments as a interaction with the plant age. I included sequencing depth as a covariate. This would probably work best in a mixed model, but I am using this method for the time being due to its simplicity. The data is log transformed to hopefully bring the error distribution somewhere to normal. Later, I would like to employ a different normalization strategy called rarefaction and then run a negative binomial glm.
+### Make a function to plot OTU abundance
 ```{r}
-library(knitr)
-methanogen.lm <- ark.data %>% 
-  filter(grepl("Methano", Order)) %>% 
+otu.plot <- function(., method = "lm"){
+  ggplot(., aes(Days, value, color = Cultivar)) +
+    geom_point() +
+    geom_smooth(method = method, se = F) +
+    facet_grid(.~Compartment) +
+    scale_color_brewer(palette = "Accent")
+}
+```
+
+I'm going to throw this section out eventually.
+```{r}
+comp.models <- ark.data %>% 
+  group_by(variable) %>% 
+  summarise(sum = sum(value)) %>% 
+  arrange(-sum) %>% 
+  head(4000) %>% 
+  inner_join(ark.data, by = "variable") %>% 
   group_by(variable) %>% 
   nest() %>% 
-  mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
-  unnest(map(models, tidy)) %>% 
-  mutate(p.adj = p.adjust(p.value, "BH"))
+  mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days, .))) %>% 
+  mutate(ANOVA = map(models, ~anova(.)))
 
-methanogen.lm_results <- methanogen.lm %>% 
-  filter(p.adj <= 0.05) 
+comp.results <- comp.models %>% 
+  unnest(map(ANOVA, tidy))
 
-kable(methanogen.lm_results)
-```
-There are 5 OTUs that come back as having a significant interaction over time in the rhizosphere (being significantly different than bulk soil). Let's see if any of these have a significant cultivar interactin with time
+comp.results %>% 
+  filter(term == "Compartment:Days") %>% 
+  mutate(p.adj = p.adjust(p.value)) %>% 
+  inner_join(tax, by = "variable") %>% 
+  filter(p.adj <= 0.01) %>% 
+  arrange(-p.adj) %>% 
+  filter(grepl("Methyl", Family))
 
-```{r}
-cultivar_mathanogens <- methanogen.lm %>% 
-  filter(p.adj <= 0.05 & term == "CompartmentRhizosphere:Days") %>% 
-  dplyr::select(variable) %>% 
+cult.models <- ark.data %>% 
+  group_by(variable) %>% 
+  summarise(sum = sum(value)) %>% 
+  arrange(-sum) %>% 
+  head(4000) %>% 
   inner_join(ark.data, by = "variable") %>% 
   filter(Compartment != "Bulk Soil") %>% 
   group_by(variable, Compartment) %>% 
   nest() %>% 
-  mutate(models = map(data, ~lm(log2(value + 1) ~ Cultivar * Days + Depth, .))) %>% 
-  unnest(map(models, tidy)) %>% 
-  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
-  filter(p.adj <= 0.05)
+  mutate(models = map(data, ~rlm(log2(value + 1) ~ Cultivar*Days, .))) %>% 
+  mutate(ANOVA = map(models, ~anova(.)))
 
-kable(cultivar_mathanogens)
+cult.anova.results <- cult.models %>% 
+  unnest(map(ANOVA, tidy))
+cult.lm.results <- cult.models %>% 
+  unnest(map(models, tidy))
+
+cult.anova.results %>% 
+  inner_join(tax, by = "variable") %>% 
+  group_by(term, Compartment, Phylum2) %>% 
+  mutate(p.adj = p.adjust(p.value)) %>% 
+  filter(term == "Cultivar:Days") %>% 
+  filter(p.adj <= 0.05) %>% 
+  ungroup() %>% 
+  dplyr::select(variable, Compartment) %>% 
+  inner_join(cult.lm.results, by = c("variable", "Compartment")) %>% 
+  filter(term == "Days" | term == "CultivarSabine:Days") %>% 
+  mutate(term = gsub("CultivarSabine:Days", "CultivarSabineDays", term)) %>% 
+  dplyr::select(variable, Compartment, term, estimate) %>% 
+  spread(term, estimate) %>% 
+  rename(CLXLSlope = Days) %>% 
+  mutate(SabineSlope = CLXLSlope + CultivarSabineDays) %>% 
+  arrange(CultivarSabineDays) %>% 
+  ggplot(., aes(fct_reorder(variable, CultivarSabineDays), CultivarSabineDays)) +
+  geom_point() +
+  facet_wrap(~Compartment, scales = "free")
+
 ```
-
-Two methanogens came back as being higher in Sabine than CLXL745 over time. 533 is Methanocella and 626383 is Methanobacterium.
 ```{r}
 ark.data %>% 
-  filter(variable == "626383" | variable == "533") %>% 
-  mutate(Compartment = factor(Compartment, levels = c("Bulk Soil", "Rhizosphere", "Endosphere"))) %>% 
-  ggplot(., aes(Date, value, color = Cultivar)) +
-  geom_point() +
-  geom_smooth(se = F) +
-  facet_grid(.~variable+Compartment) +
-  scale_color_brewer(palette = "Accent") +
+  filter(variable == "533") %>% 
+  otu.plot(method = "lm")
+```
+
+
+
+## Doing stats with negative binomial GLM
+First requires that we have count data that is normalized. We will use rarefaction for this job. I hate this method because we have to throw away so much of the data. The minimum sequencing depth was 4384 sequences. We will randomly sample 4384 sequences from each sample.
+```{r}
+rare <- t(rrarefy(t(countsNoOrg), sample = min(colSums(countsNoOrg))))
+rare.clean <- rare[apply(rare, 1, occurence) >= ncol(rare) * 0.05,]
+rare.clean <- rare.clean[,match(map$SampleID, colnames(rare.clean))]
+cat(nrow(rare), "OTUs in original table.\n")
+cat(nrow(rare.clean), "OTUs in cleaned table.\n")
+```
+
+Just for fun I will also do the beta diversity stats here on this new dataset.
+```{r}
+adonis(t(log2(rare.clean + 1)) ~ Compartment + Days*Cultivar, strata = factor(map$Lane), data = map)
+```
+```{r}
+ark.pc_rare <- capscale(t(log2(rare.clean + 1)) ~ 1)
+ark.pc_axes_rare <- cbind(map, scores(ark.pc_rare, choices = c(1:3))$sites)
+ark.pc_axes_rare %>% 
+  ggplot(., aes(MDS1, MDS2, color = factor(Date), shape = Compartment)) +
+  geom_point(size = 2) +
   theme_minimal() +
-  labs(x = "", y = "Relative Abundance (per Mille)") +
-  theme(text = element_text(size = 10), axis.text.x = element_text(angle = 30, hjust = 1))
+  labs(color = "Date")
 ```
 
-I think the association would be stronger if not for that one CLXL745 sample in September.
-
-### Methanotrophs
-Methanotrophic eubacteria could be on the other side of this methane story. There are two families with methanotrophic capabilities, Methylocystaceae and Methylococcaceae. There's an outlier genus in Methylocystaceae that cannot perform methanotrophy, Pleomorphomonas. 
+Here we will convert the data to the 'long' format.
 ```{r}
-methanotroph.lm <- ark.data %>% 
-  filter(Family == "Methylocystaceae" | Family == "Methylococcaceae") %>% 
-  filter(Genus != "Pleomorphomonas") %>% 
+rare.data <- melt(cbind(map, t(rare.clean)), id.vars = names(map)) %>% inner_join(tax, by = "variable")
+```
+
+## Modelling effects using a negative binomial glm. This is where the stats get real. The linear models employed above are theoretically inappropriate for this data type. Here we have count data which effects the way we should approach modelling. We could use a glm with a poisson distribution family, but our data is overdispersed. This means that the variances of the OTUs are greater than the means. Let's take a look at this.
+
+```{r}
+rare.data %>% 
   group_by(variable) %>% 
-  nest() %>% 
-  mutate(models = map(data, ~lm(log2(value + 1) ~ Compartment*Days + Depth, .))) %>% 
-  unnest(map(models, tidy)) %>% 
-  mutate(p.adj = p.adjust(p.value, "BH"))
-
-methanotroph.lm_results <- methanotroph.lm %>% 
-  filter(p.adj <= 0.05)
-
-kable(methanotroph.lm_results)
+  summarise(mean = mean(value), var = var(value)) %>% 
+  ggplot(aes(mean, var)) +
+  geom_point(alpha = 0.1) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Mean Abundance", y = "Variance")
 ```
-There are a few methanotrophs that seems to become enriched in the endopshere over time (but not in the rhizosphere). This pattern makes sense as the endosphere should have the highest levels of oxygen, a conditions that a methanotrophic lifestyle requires. Let's see if any of the OTUs have an interaction with time to become differentially abundant between the cultivars.
+
+This means that poisson won't model our counts well and we should look at another family of regression called negative binomial (NB). NB models can handle overdispersed data. We can run a NB GLM through the MASS package. Let's go ahead and load the required packages.
 ```{r}
-cultivar_methanotrophs <- methanotroph.lm %>% 
-  filter(p.adj <= 0.05 & term == "CompartmentEndosphere:Days") %>% 
-  dplyr::select(variable) %>% 
-  inner_join(ark.data, by = "variable") %>% 
-  filter(Compartment != "Bulk Soil") %>% 
-  group_by(variable, Compartment) %>% 
-  nest() %>% 
-  mutate(models = map(data, ~lm(log2(value + 1) ~ Cultivar * Days + Depth, .))) %>% 
-  unnest(map(models, tidy)) %>% 
-  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
-  filter(p.adj <= 0.05)
-
-kable(cultivar_methanotrophs)
+library(MASS)
+library(stringr)
+library(forcats)
+library(broom)
 ```
-It looks like two of the methanotrophs change their abundance patterns over the season, but there is not significant differences between the cultivars.
+The strategy will be to run a glm for each OTU. When you run models like this, there is a possibility that one of the models will fail and the whole data frame will not get saved because R throws an error. We will use the possibly() adverb from the purrr package to get around this. If there is an error, the possibly adverb tells the map function to just fill the output with an NA.
+```{r}
+safe_glm <- possibly(glm.nb, NA_real_)
+```
+Let's first find OTUs that are significantly different across compartments and over time. The baseline will be bulk soil.
+```{r}
+comp.glm <- rare.data %>% 
+  group_by(variable) %>% 
+  summarise(prev = sum(value > 0) / n()) %>% 
+  filter(prev >= 0.1) %>% 
+  inner_join(rare.data, by = "variable") %>% 
+  group_by(variable) %>% 
+  na.omit() %>% 
+  nest() %>% 
+  mutate(nb_model = map(data, ~safe_glm(value ~ Compartment*Days, .))) %>% 
+  mutate(type = "No offset")
 
+comp.glm_results <- comp.glm %>%
+  unnest(map(nb_model, tidy)) %>% 
+  inner_join(tax, by = "variable") %>% 
+  mutate(p.adj = p.adjust(p.value, "BY"))
+
+comp.glm_results %>% 
+  filter(p.adj <= 0.01) %>%
+  arrange(estimate)
+  filter(term == "CompartmentEndosphere:Days" | term == "CompartmentRhizosphere:Days") %>% 
+  ggplot(aes(fct_reorder(variable, estimate), estimate, color = Phylum2)) +
+  geom_point() +
+  facet_grid(.~term)
+```
+
+```{r}
+cult.glm <- rare.data %>% 
+  group_by(variable, Compartment) %>% 
+  summarise(prev = sum(value > 0) / n()) %>% 
+  filter(prev >= 0.1) %>% 
+  inner_join(rare.data, by = c("variable", "Compartment")) %>% 
+  filter(Compartment != "Bulk Soil") %>% 
+  group_by(Compartment, variable) %>% 
+  na.omit() %>% 
+  nest() %>% 
+  mutate(nb_model = map(data, ~safe_glm(value ~ Cultivar*Days, .))) %>% 
+  mutate(type = "No offset")
+cult.glm %>% 
+  head()
+```
+
+How do we investigate the results of the multiple models? It would be hell to run a summary on each model to gather the coefficients. It would also be a pain to write your own function to do this. Fortunately the Broom package offers a concise and intuitive function to do this using tidy(). Because we have a nice nested dataframe, we can input this into map and get the coefficients for each of the models.
+```{r}
+cult.glm_results <- cult.glm %>%
+  inner_join(tax, by = "variable") %>% 
+  unnest(map(nb_model, tidy)) %>%
+  mutate(p.adj = p.adjust(p.value, method = "BY"))
+```
+
+There are several ways of going deeper into the models to find trends. Quantitative geneticists rely on manhattan plots to identify loci in the genome associated with certain traits. On the x-axis, these plots show the genomic locus. On the y-axis, these plots show some kind of score for a correlative measure. The larger the peak, the stronger the correlation. Here, I've made a modified version of this technique suited to microbes. Of course there are no genomes to work with here. Instead, we can group the microbes by the phylogenetic relationships. One could use the topology of the phylogenetic tree of 16S rRNA genes to do this. I'm not going to do that here because there are all kinds of polytomies in the tree, so it can get messy. Instead I will group them by their Phylum, Order, and Families. So for instance, all the Protoebacteria will be together sorted by their orders and families. All of the Actinobacteria will be together sorted by their orders and families. Even though the topology of the tree is messed up, the order still follows a heirarchical pattern.
+
+I have modified the y-axis here to represent whether a microbe is up or down depending on the comparison. For instance, if the comparison is Days. A significant value < 0 represents microbes that were significantly decreasing over the season. Above 0 reprepsents microbes that were significantly increasing over the season. If the comparison is cultivar, then above 0 will be OTUs enriched in Sabine and below 0 will be OTUs enriched in CLXL745.
+```{r}
+manhattan_plot <- function(model_results, model_term) {
+  plot.dat <- model_results %>% 
+    filter(term == model_term) %>% 
+    arrange(paste(Phylum, Phylum2, Class, Order, Family)) %>% 
+    mutate(rank = 1:nrow(.)) %>% 
+    mutate(direction = ifelse(estimate > 0, 1, -1)) %>% 
+    mutate(sig = ifelse(p.adj <= 0.05, "sig", "ns")) %>% 
+    mutate(variable = fct_reorder(variable, rank))
+
+  areas <- plot.dat %>% 
+    group_by(Phylum2) %>% 
+    summarise(min = min(rank), max = max(rank)) %>% 
+    mutate(type = 1:n()) %>% 
+    mutate(type2 = ifelse(type %% 2 == 0, "even", "odd"))
+  
+  ggplot(plot.dat) +
+    geom_rect(data = areas, aes(xmin = min, xmax = max, ymin = -Inf, ymax = Inf, fill = type2), alpha = 0.3) +
+    geom_point(data = plot.dat %>% filter(sig == "ns"), aes(rank, -log10(p.adj) * direction, size = abs(estimate)), color = "black", alpha = 0.01) +
+    geom_point(data = plot.dat %>% filter(sig == "sig"), aes(rank, -log10(p.adj) * direction, color = Family, size = abs(estimate), alpha = abs(statistic))) +
+    scale_size(range = c(0,15)) +
+    facet_grid(Compartment ~ .) +
+    theme_bw() + 
+    labs(x = "Microbe", y = "-Log10(P)") +
+    theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+    scale_fill_manual(values = c("grey70", "white"))
+}
+```
+
+```{r}
+cult.glm_results %>% 
+  manhattan_plot(., "CultivarSabine:Days")
+```
+
+
+```{r}
+rare.data %>% 
+  filter(variable == "1139084") %>% 
+  otu.plot()
+rare.data %>% 
+  ggplot(aes(log(value + 1))) +
+  geom_histogram()
+```
 
 
 
