@@ -86,14 +86,19 @@ ark.data %>%
   arrange(-total) %>% 
   head(10) %>% 
   inner_join(ark.data, by = "Phylum2") %>% 
-  group_by(SampleID, Compartment, Cultivar, Plot, Phylum2, Date, Rep) %>% 
+  group_by(SampleID, Compartment, Cultivar, Plot, Phylum2, Days, Rep) %>% 
   summarise(total = sum(value)) %>% 
-  ggplot(., aes(x = paste(Plot, Rep), y = total, fill = Phylum2))+
-  geom_bar(stat = "identity") +
+  ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Endosphere")) %>% 
+  mutate(SampleID = fct_reorder(SampleID, Days)) %>% 
+  ggplot(., aes(x = SampleID, y = total / 10, fill = Phylum2))+
+  geom_bar(stat = "identity", width = 1) +
+  geom_point(aes(y = -2, x = SampleID, color = Days)) +
   labs(x = "Individual Samples", y = "Relative Abundance") +
-  facet_grid(Compartment ~ Date, scales = "free") +
+  facet_grid(. ~ Compartment, scales = "free") +
   scale_fill_brewer(palette = "Spectral") +
   theme_minimal() +
+  scale_color_gradientn(colours = c("darkgreen", "gold")) +
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "bottom")
 ```
 
@@ -190,16 +195,32 @@ cat(nrow(rare.clean), "OTUs in cleaned table.\n")
 
 Just for fun I will also do the beta diversity stats here on this new dataset.
 ```{r}
-adonis(t(log2(rare.clean + 1)) ~ Compartment + Days*Cultivar, strata = factor(map$Lane), data = map)
+mapNoSoil <- map %>% filter(Cultivar != "Soil")
+rareNoSoil <- rare.clean[,match(mapNoSoil$SampleID, colnames(rare.clean))]
+adonis(t(log2(rareNoSoil + 1)) ~ Compartment*factor(Days)*Cultivar, strata = mapNoSoil$Lane, data = mapNoSoil)
 ```
 ```{r}
 ark.pc_rare <- capscale(t(log2(rare.clean + 1)) ~ 1)
 ark.pc_axes_rare <- cbind(map, scores(ark.pc_rare, choices = c(1:3))$sites)
 ark.pc_axes_rare %>% 
-  ggplot(., aes(MDS1, MDS2, color = factor(Date), shape = Compartment)) +
+  mutate(Compartment = fct_reorder(Compartment, MDS1)) %>% 
+  ggplot(., aes(MDS1, MDS2, color = Days + 14, shape = Compartment)) +
   geom_point(size = 2) +
   theme_minimal() +
-  labs(color = "Date")
+  labs(x = "PCo1 (19.7%)", y = "PCo2 (8.0%)") +
+  scale_color_gradientn(colours = c("darkgreen", "gold")) +
+  theme(legend.position = "none")
+ark.pc_axes_rare %>% 
+  mutate(Compartment = fct_reorder(Compartment, MDS1)) %>% 
+  ggplot(., aes(MDS1, MDS2, color = Compartment)) +
+  geom_point(size = 2, alpha = 0.8) +
+  theme_minimal() +
+  labs(x = "PCo1 (19.7%)", y = "PCo2 (8.0%)") +
+  scale_color_manual(values = c("#E41A1C", "#984EA3", "#377EB8")) +
+  theme(legend.position = "none")
+
+dput(brewer.pal(4, "Set1"))
+head(ark.pc_rare$CA$eig / sum(ark.pc_rare$CA$eig))
 ```
 
 Here we will convert the data to the 'long' format.
@@ -249,13 +270,6 @@ comp.glm_results <- comp.glm %>%
   inner_join(tax, by = "variable") %>% 
   mutate(p.adj = p.adjust(p.value, "BY"))
 
-comp.glm_results %>% 
-  filter(p.adj <= 0.01) %>%
-  arrange(estimate)
-  filter(term == "CompartmentEndosphere:Days" | term == "CompartmentRhizosphere:Days") %>% 
-  ggplot(aes(fct_reorder(variable, estimate), estimate, color = Phylum2)) +
-  geom_point() +
-  facet_grid(.~term)
 ```
 
 ```{r}
@@ -286,10 +300,9 @@ There are several ways of going deeper into the models to find trends. Quantitat
 
 I have modified the y-axis here to represent whether a microbe is up or down depending on the comparison. For instance, if the comparison is Days. A significant value < 0 represents microbes that were significantly decreasing over the season. Above 0 reprepsents microbes that were significantly increasing over the season. If the comparison is cultivar, then above 0 will be OTUs enriched in Sabine and below 0 will be OTUs enriched in CLXL745.
 ```{r}
-manhattan_plot <- function(model_results, model_term) {
+manhattan_plot <- function(model_results) {
   plot.dat <- model_results %>% 
-    filter(term == model_term) %>% 
-    arrange(paste(Phylum, Phylum2, Class, Order, Family)) %>% 
+    arrange(paste(Phylum, Phylum2, Class, Order, Family, Genus)) %>% 
     mutate(rank = 1:nrow(.)) %>% 
     mutate(direction = ifelse(estimate > 0, 1, -1)) %>% 
     mutate(sig = ifelse(p.adj <= 0.05, "sig", "ns")) %>% 
@@ -306,17 +319,21 @@ manhattan_plot <- function(model_results, model_term) {
     geom_point(data = plot.dat %>% filter(sig == "ns"), aes(rank, -log10(p.adj) * direction, size = abs(estimate)), color = "black", alpha = 0.01) +
     geom_point(data = plot.dat %>% filter(sig == "sig"), aes(rank, -log10(p.adj) * direction, color = Family, size = abs(estimate), alpha = abs(statistic))) +
     scale_size(range = c(0,15)) +
-    facet_grid(Compartment ~ .) +
     theme_bw() + 
     labs(x = "Microbe", y = "-Log10(P)") +
     theme(panel.grid.major=element_blank(),panel.grid.minor=element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
     scale_fill_manual(values = c("grey70", "white"))
 }
 ```
+```{r}
+comp.glm_results %>% 
+  filter(term == "CompartmentEndosphere:Days" | term == "CompartmentRhizosphere:Days") %>% 
+  manhattan_plot(.) + facet_grid(. ~ term) + theme(legend.position = "bottom")
+```
 
 ```{r}
 cult.glm_results %>% 
-  manhattan_plot(., "CultivarSabine:Days")
+  manhattan_plot(., "CultivarSabine:Days") + facet_grid(.~Compartment)
 ```
 
 
@@ -329,5 +346,114 @@ rare.data %>%
   geom_histogram()
 ```
 
+Something that has been bothering me is that I specifically want to know what's happening with the archaea. Archaea are not well represented in this data.
+```{r}
+rare.data %>% 
+  group_by(SampleID, Compartment, Kingdom, Days) %>% 
+  filter(value > 0) %>% 
+  summarise(numberOTUs = n()) %>% 
+  group_by(Compartment, Days, Kingdom) %>% 
+  summarise(meanOTUs = mean(numberOTUs), se = sd(numberOTUs) / sqrt(n())) %>%
+  ggplot(., aes(Days, meanOTUs, fill = Kingdom)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_grid(.~Compartment) +
+  labs(x = "Plant Age", y = "Mean Number of OTUs") +
+  coord_flip() +
+  scale_fill_manual(values = c("purple", "gold"))
+```
+The mean number of archaeal OTUs is only a drop in the bucket compared to bacteria
+```{r}
+rare.data %>% 
+  group_by(Compartment, Kingdom, Days, variable) %>%
+  summarise(total = sum(value)) %>% 
+  filter(total > 0) %>% 
+  group_by(Compartment, Days, Kingdom) %>% 
+  summarise(numberOTUs = n()) %>% 
+  ggplot(., aes(Days, numberOTUs, fill = Kingdom)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~Kingdom + Compartment, scales = "free") +
+  labs(x = "Plant Age", y = "Total number of OTUs", scales = "free") +
+  scale_fill_manual(values = c("purple", "gold")) 
+```
 
+```{r}
+rare.data %>% 
+  group_by(variable, Kingdom) %>% 
+  summarise(total = sum(value)) %>% 
+  group_by(Kingdom) %>% 
+  filter(total > 0) %>% 
+  summarise(n())
+dim(rare.clean)
+```
+```{r}
+ark.data %>% 
+  filter(Kingdom == "Archaea") %>% 
+  group_by(Compartment, Phylum, Class, Family, SampleID, Days, Cultivar, Plot, Rep) %>% 
+  summarise(sum_group = sum(value)) %>% 
+  ungroup() %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Endosphere")) %>%
+  mutate(SampleID = fct_reorder(SampleID, Days)) %>% 
+  ggplot(., aes(SampleID, sum_group / 10, fill = paste(Phylum, Class, Family))) +
+  geom_bar(stat = "identity", width = 1) +
+  geom_point(aes(x = SampleID, y = -0.1, color = Days)) +
+  facet_grid(. ~ Compartment + Cultivar, scales = "free_x", space = "free_x") +
+  theme_minimal() +
+  scale_fill_manual(values = c(brewer.pal(9, "Greys")[2:5], brewer.pal(9, "OrRd")[3:9])) +
+  scale_color_gradientn(colours = c("darkgreen", "gold")) +
+  labs(x = "", y = "Percent of Microbial Community", fill = "Phylum Class Family") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "bottom", legend.direction = "horizontal", legend.box = "vertical") +
+  guides(fill = guide_legend(title.position = "top", title.hjust = 0.5),
+         color = guide_legend(title.position = "top", title.hjust = 0.5)) 
+```
+```{r}
+arch_models <- ark.data %>% 
+  filter(Kingdom == "Archaea" & Compartment != "Bulk Soil") %>% 
+  mutate(Days = Days + 14) %>% 
+  group_by(Compartment, taxon = paste(Phylum, Class, Family), SampleID, Days, Cultivar) %>% 
+  summarise(sum_group = sum(value)) %>% 
+  group_by(Compartment, taxon) %>% 
+  nest() %>% 
+  mutate(model = map(data, ~lm(log2(sum_group + 1) ~ Days*Cultivar, .)))
+arch_models %>% 
+  unnest(map(model, tidy)) %>% 
+  group_by(Compartment) %>% 
+  mutate(p.adj = p.adjust(p.value, "BH")) %>% 
+  filter(p.adj <= 0.05)
+```
+
+```{r}
+ark.data %>% 
+  filter(Family == "Methylocystaceae" | Family == "Methylococcaceae") %>% 
+  mutate(Compartment = fct_relevel(Compartment, "Bulk Soil", "Rhizosphere", "Endosphere")) %>% 
+  group_by(SampleID, taxon = paste(Family, Genus), Days, Compartment, Cultivar) %>% 
+  summarise(total = sum(value)) %>% 
+  ggplot(., aes(fct_reorder(SampleID, Days), total / 10, fill = taxon)) +
+  geom_bar(stat = "identity", width = 1) +
+  facet_grid(.~Compartment + Cultivar, scales = "free")
+```
+
+
+```{r}
+rare.data %>% 
+  group_by(SampleID, Compartment, Kingdom, Depth) %>%
+  filter(Kingdom == "Archaea") %>% 
+  summarise(total = sum(value)) %>% 
+  ggplot(., aes(Depth, total)) +
+  geom_point() +
+  facet_wrap(~Compartment + Kingdom) +
+  scale_x_log10()
+
+rare.data %>% 
+  group_by(SampleID, Compartment, Kingdom, Depth) %>%
+  filter(Kingdom == "Archaea") %>% 
+  summarise(total = sum(value)) %>% 
+  group_by(Compartment) %>% 
+  nest() %>% 
+  mutate(lm_mod = map(data, ~aov(total ~ log(Depth), .))) %>% 
+  unnest(map(lm_mod, tidy))
+  ggplot(., aes(Depth, total)) +
+  geom_point() +
+  facet_grid(.~Compartment) +
+  
+```
 
